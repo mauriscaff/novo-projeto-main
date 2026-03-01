@@ -1,2 +1,0 @@
-{"hypothesisId": "H0", "location": "scanner.py:start_scan", "message": "start_scan entry", "data": {"vcenter_ids_len": 3}, "timestamp": 1772126391486.2144}
-{"hypothesisId": "H1", "location": "scanner.py:after_flush", "message": "after db.flush ok", "data": {"job_id": "58a8a009-eb6f-4c9c-a334-b48031e67e31"}, "timestamp": 1772126391498.4106}

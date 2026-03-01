@@ -2,9 +2,16 @@
 .env
 .env.local
 .env.*.local
+!.env.example
 
-# Banco SQLite local
-*.db
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/
+
+# Debug logs gerados pela aplicação
+debug-*.log
+*.log
 
 # Python
 __pycache__/
@@ -25,6 +32,11 @@ build/
 .venv/
 venv/
 env/
+
+# Banco de dados local
+*.db
+*.sqlite
+*.sqlite3
 
 # IDE
 .idea/
