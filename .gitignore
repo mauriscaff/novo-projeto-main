@@ -1,0 +1,38 @@
+# Ambiente e segredos (nunca versionar)
+.env
+.env.local
+.env.*.local
+
+# Banco SQLite local
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Cursor / IDE
+.cursor/
+
+# Virtualenv (opcional)
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
