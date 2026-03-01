@@ -16,6 +16,11 @@ SHARED_EMPTY: set[str] = set()
 GLOBAL_FILES_EMPTY: set = set()
 
 
+def _is_skip(r):
+    """True se _classify_vmdk retornou skip (None ou (None, reason))."""
+    return r is None or (isinstance(r, tuple) and len(r) == 2 and r[0] is None)
+
+
 class TestExclusionRules:
     """Cada regra EX-* deve retornar None (não classificar como zombie)."""
 
@@ -39,7 +44,7 @@ class TestExclusionRules:
             stale_snapshot_days=15,
             min_file_size_mb=50,
         )
-        assert result is None
+        assert _is_skip(result)
 
     def test_ex4_vcls_excluded(self, fake_inventory_empty):
         """EX-4: vCLS-*.vmdk (vSphere Cluster Services) sempre ignorado."""
@@ -57,7 +62,7 @@ class TestExclusionRules:
             stale_snapshot_days=15,
             min_file_size_mb=50,
         )
-        assert result is None
+        assert _is_skip(result)
 
     def test_ex2_flat_with_descriptor_excluded(self, fake_inventory_empty):
         """EX-2: *-flat.vmdk quando descriptor na mesma pasta → ignorado."""
@@ -79,7 +84,7 @@ class TestExclusionRules:
             stale_snapshot_days=15,
             min_file_size_mb=50,
         )
-        assert result is None
+        assert _is_skip(result)
 
     def test_ex6_content_library_excluded(self, fake_inventory_content_library):
         """EX-6: VMDK em pasta de Content Library (contentlib-*) ignorado."""
@@ -102,4 +107,4 @@ class TestExclusionRules:
             stale_snapshot_days=15,
             min_file_size_mb=50,
         )
-        assert result is None
+        assert _is_skip(result)

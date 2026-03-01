@@ -186,5 +186,5 @@ class PaginatedResults(BaseModel):
 # Parâmetros de filtro e ordenação (usados via Query params)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SortByField = Literal["tamanho_gb", "ultima_modificacao", "tipo_zombie", "datastore"]
+SortByField = Literal["tamanho_gb", "ultima_modificacao", "tipo_zombie", "datastore", "confidence_score"]
 SortOrder = Literal["asc", "desc"]

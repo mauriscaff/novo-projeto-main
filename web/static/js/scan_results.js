@@ -28,13 +28,13 @@ const API_VCENTERS = "/api/v1/vcenters";
 const API_APPROVALS = "/api/v1/approvals";
 const PAGE_SIZES   = [25, 50, 100, 200];
 
-/** Metadados de cada tipo zombie — mesma paleta do dashboard.js */
+/** Metadados de cada tipo zombie — cores por especificação */
 const ZM = {
-  ORPHANED:                 { label: "Orphaned",          color: "#f85149", bg: "rgba(248,81,73,.15)",  icon: "bi-x-circle-fill" },
-  SNAPSHOT_ORPHAN:          { label: "Snapshot Orphan",   color: "#fb8500", bg: "rgba(251,133,0,.15)", icon: "bi-camera-fill" },
-  BROKEN_CHAIN:             { label: "Broken Chain",      color: "#d29922", bg: "rgba(210,153,34,.15)", icon: "bi-link-45deg" },
-  UNREGISTERED_DIR:         { label: "Unregistered Dir",  color: "#bc8cff", bg: "rgba(188,140,255,.15)",icon: "bi-folder-x" },
-  POSSIBLE_FALSE_POSITIVE:  { label: "False Positive",    color: "#6e7681", bg: "rgba(110,118,129,.15)",icon: "bi-question-circle-fill" },
+  ORPHANED:                 { label: "Orphaned",          color: "#dc3545", bg: "rgba(220,53,69,.2)",   icon: "bi-x-circle-fill", darkText: false },
+  SNAPSHOT_ORPHAN:          { label: "Snapshot Orphan",   color: "#fd7e14", bg: "rgba(253,126,20,.2)",  icon: "bi-camera-fill",    darkText: false },
+  BROKEN_CHAIN:             { label: "Broken Chain",      color: "#6f42c1", bg: "rgba(111,66,193,.2)",  icon: "bi-link-45deg",     darkText: false },
+  UNREGISTERED_DIR:         { label: "Unregistered Dir",  color: "#ffc107", bg: "rgba(255,193,7,.25)", icon: "bi-folder-x",       darkText: true },
+  POSSIBLE_FALSE_POSITIVE:  { label: "False Positive",    color: "#6c757d", bg: "rgba(108,117,125,.2)", icon: "bi-question-circle-fill", darkText: false },
 };
 
 /** Status do registro VMDK */
@@ -345,10 +345,24 @@ function _initDataTable() {
     order:      [[4, "desc"]],          // padrão: maior tamanho primeiro
     pageLength: PAGE_SIZES[0],
     lengthMenu: [PAGE_SIZES, PAGE_SIZES.map((n) => `${n} por página`)],
-    searching:  false,                   // busca gerenciada pelos filtros próprios
+    searching:  false,
     info:       true,
     responsive: false,
     scrollX:    true,
+
+    rowCallback: function(row, data) {
+      const score = data.confidence_score != null ? Number(data.confidence_score) : "";
+      row.setAttribute("data-score", String(score));
+      row.setAttribute("data-tipo", String(data.tipo_zombie || ""));
+      const gb = data.tamanho_gb != null && data.tamanho_gb !== "" ? Number(data.tamanho_gb) : "";
+      row.setAttribute("data-size", String(gb));
+      let ageDays = "";
+      if (data.ultima_modificacao) {
+        const mod = new Date(data.ultima_modificacao).getTime();
+        if (!isNaN(mod)) ageDays = Math.floor((Date.now() - mod) / (24 * 60 * 60 * 1000));
+      }
+      row.setAttribute("data-modified-days", String(ageDays));
+    },
 
     language: {
       processing:  `<span class="text-muted-zh small"><i class="bi bi-hourglass-split me-1"></i>Carregando…</span>`,
@@ -369,9 +383,11 @@ function _initDataTable() {
       + "<'table-responsive'tr>"
       + "<'d-flex justify-content-end mt-2'p>",
 
-    drawCallback: () => {
+    drawCallback: function() {
       _rebindRowEvents();
       _syncCheckAll();
+      _applyClientFilters();
+      _updateVisibleCount();
     },
   });
 }
@@ -387,7 +403,7 @@ function _buildAjaxParams(d) {
   if (d.order?.length) {
     const colIdx  = d.order[0].column;
     const colData = d.columns[colIdx]?.data;
-    const sortMap = { tamanho_gb: "size", ultima_modificacao: "modified", tipo_zombie: "tipo" };
+    const sortMap = { tamanho_gb: "size", ultima_modificacao: "modified", tipo_zombie: "tipo", confidence_score: "confidence_score" };
     params.sort_by  = sortMap[colData] ?? colData;
     params.sort_dir = d.order[0].dir;
   }
@@ -397,6 +413,9 @@ function _buildAjaxParams(d) {
   const fTipo = document.getElementById("f-tipo")?.value;
   const fSts  = document.getElementById("f-status")?.value;
   const fGb   = document.getElementById("f-min-gb")?.value;
+  const fConf = document.getElementById("f-min-confidence")?.value;
+  const fModAfter  = document.getElementById("f-modified-after")?.value;
+  const fModBefore = document.getElementById("f-modified-before")?.value;
   const fDate = document.getElementById("f-date")?.value;
   const fJob  = document.getElementById("f-job-id")?.value;
 
@@ -404,10 +423,33 @@ function _buildAjaxParams(d) {
   if (fTipo) params.tipo      = fTipo;
   if (fSts)  params.status    = fSts;
   if (fGb)   params.min_size_gb = parseFloat(fGb);
+  if (fConf) params.min_confidence = parseInt(fConf, 10);
+  if (fModAfter)  params.modified_after  = fModAfter;
+  if (fModBefore) params.modified_before = fModBefore;
   if (fDate) params.scan_date = fDate;
   if (fJob)  params.job_id   = fJob;
 
+  _updateActiveFiltersBadge(params);
   return params;
+}
+
+/** Atualiza o badge "X filtros ativos" no painel de filtros */
+function _updateActiveFiltersBadge(params) {
+  const skip = { page: 1, per_page: 1, sort_by: 1, sort_dir: 1 };
+  let n = 0;
+  for (const k of Object.keys(params)) {
+    if (skip[k]) continue;
+    if (params[k] !== undefined && params[k] !== "" && params[k] !== null) n++;
+  }
+  const badge = document.getElementById("zh-active-filters-badge");
+  if (badge) {
+    if (n > 0) {
+      badge.textContent = n + " ativo" + (n === 1 ? "" : "s");
+      badge.classList.remove("d-none");
+    } else {
+      badge.classList.add("d-none");
+    }
+  }
 }
 
 // ── Filtros ───────────────────────────────────────────────────────────────────
@@ -429,24 +471,136 @@ async function _populateVcenterFilter() {
   } catch (_) { /* falha silenciosa — select fica só com "Todos" */ }
 }
 
+/** Aplica filtros client-side (oculta/exibe linhas da tabela) */
+function _applyClientFilters() {
+  const tbody = document.querySelector("#zh-table-results tbody");
+  if (!tbody) return;
+  const scoreMin = parseInt(document.getElementById("zh-cf-score")?.value ?? "60", 10);
+  const sizeMin = parseFloat(document.getElementById("zh-cf-size")?.value ?? "0") || 0;
+  const modifiedDaysRaw = document.getElementById("zh-cf-modified-days")?.value?.trim();
+  const modifiedDaysMin = modifiedDaysRaw === "" ? null : parseInt(modifiedDaysRaw, 10);
+  const checkedTipos = new Set();
+  document.querySelectorAll(".zh-cf-tipo:checked").forEach((cb) => checkedTipos.add(cb.value));
+
+  tbody.querySelectorAll("tr").forEach((tr) => {
+    if (tr.cells.length < 2) return;
+    const score = tr.getAttribute("data-score");
+    const scoreNum = score === "" || score === null ? -1 : parseFloat(score);
+    const tipo = tr.getAttribute("data-tipo") || "";
+    const size = tr.getAttribute("data-size");
+    const sizeNum = size === "" || size === null ? -1 : parseFloat(size);
+    const modDays = tr.getAttribute("data-modified-days");
+    const modDaysNum = modDays === "" || modDays === null ? null : parseInt(modDays, 10);
+
+    const passScore = scoreNum < 0 || scoreNum >= scoreMin;
+    const passTipo = checkedTipos.size === 0 || checkedTipos.has(tipo);
+    const passSize = sizeNum < 0 || sizeNum >= sizeMin;
+    const passMod = modifiedDaysMin === null || (modDaysNum !== null && modDaysNum >= modifiedDaysMin);
+
+    tr.style.display = passScore && passTipo && passSize && passMod ? "" : "none";
+  });
+}
+
+/** Atualiza o texto "Exibindo X de Y resultados" */
+function _updateVisibleCount() {
+  const tbody = document.querySelector("#zh-table-results tbody");
+  const el = document.getElementById("zh-visible-count");
+  if (!tbody || !el) return;
+  const rows = tbody.querySelectorAll("tr");
+  let total = 0;
+  let visible = 0;
+  rows.forEach((tr) => {
+    if (tr.cells.length < 2) return;
+    total++;
+    if (tr.style.display !== "none") visible++;
+  });
+  el.textContent = `Exibindo ${visible} de ${total} resultados`;
+}
+
+/** Exporta CSV apenas das linhas visíveis (Blob + createObjectURL) */
+function _exportCsvFiltered() {
+  if (!dtInstance) return;
+  const tbody = document.querySelector("#zh-table-results tbody");
+  if (!tbody) return;
+  const visibleRows = [];
+  tbody.querySelectorAll("tr").forEach((tr) => {
+    if (tr.cells.length < 2 || tr.style.display === "none") return;
+    const data = dtInstance.row(tr).data();
+    if (data) visibleRows.push(data);
+  });
+  if (visibleRows.length === 0) {
+    if (typeof window.alert === "function") window.alert("Nenhuma linha visível para exportar. Ajuste os filtros.");
+    return;
+  }
+  const headers = ["path", "vcenter_host", "datastore", "tamanho_gb", "tipo_zombie", "confidence_score", "ultima_modificacao", "status"];
+  const escapeCsv = (v) => {
+    const s = v == null ? "" : String(v);
+    if (/[,\r\n"]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const lines = [headers.join(",")];
+  visibleRows.forEach((row) => {
+    const ultima = row.ultima_modificacao ? (typeof row.ultima_modificacao === "string" ? row.ultima_modificacao : new Date(row.ultima_modificacao).toISOString()) : "";
+    lines.push([
+      escapeCsv(row.path),
+      escapeCsv(row.vcenter_host),
+      escapeCsv(row.datastore),
+      escapeCsv(row.tamanho_gb),
+      escapeCsv(row.tipo_zombie),
+      escapeCsv(row.confidence_score),
+      escapeCsv(ultima),
+      escapeCsv(row.status),
+    ].join(","));
+  });
+  const csv = lines.join("\r\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `vmdk_zombie_visiveis_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /** Vincula eventos dos botões Filtrar / Limpar */
 function _bindFilterEvents() {
   document.getElementById("zh-btn-filter")?.addEventListener("click", () => {
     dtInstance?.ajax.reload(null, true); // reinicia na pág 1
   });
 
+  const cfScore = document.getElementById("zh-cf-score");
+  const cfScoreVal = document.getElementById("zh-cf-score-val");
+  if (cfScore && cfScoreVal) {
+    cfScore.addEventListener("input", () => {
+      cfScoreVal.textContent = cfScore.value;
+      _applyClientFilters();
+      _updateVisibleCount();
+    });
+  }
+  document.querySelectorAll(".zh-cf-tipo").forEach((cb) => {
+    cb.addEventListener("change", () => { _applyClientFilters(); _updateVisibleCount(); });
+  });
+  document.getElementById("zh-cf-modified-days")?.addEventListener("input", () => { _applyClientFilters(); _updateVisibleCount(); });
+  document.getElementById("zh-cf-size")?.addEventListener("input", () => { _applyClientFilters(); _updateVisibleCount(); });
+
+  document.getElementById("zh-export-csv-filtered")?.addEventListener("click", _exportCsvFiltered);
+
   document.getElementById("zh-btn-clear")?.addEventListener("click", () => {
-    ["f-vcenter", "f-tipo", "f-status", "f-min-gb", "f-date"].forEach((id) => {
+    [
+      "f-vcenter", "f-tipo", "f-status", "f-min-gb", "f-min-confidence",
+      "f-modified-after", "f-modified-before", "f-date",
+    ].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.value = "";
     });
     selectedRows.clear();
     _updateBatchBar();
+    _updateActiveFiltersBadge({});
     dtInstance?.ajax.reload(null, true);
   });
 
-  // Filtrar ao pressionar Enter em campos de texto
-  ["f-min-gb", "f-date"].forEach((id) => {
+  // Filtrar ao pressionar Enter em campos de texto/número
+  ["f-min-gb", "f-min-confidence", "f-date", "f-modified-after", "f-modified-before"].forEach((id) => {
     document.getElementById(id)?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") dtInstance?.ajax.reload(null, true);
     });
@@ -932,10 +1086,11 @@ function _renderSize(gb, tipo) {
 
 
 function _typeBadge(tipo) {
-  const m = ZM[tipo] ?? { label: tipo, color: "#6e7681", bg: "rgba(110,118,129,.15)", icon: "bi-question-circle" };
+  const m = ZM[tipo] ?? { label: tipo, color: "#6c757d", bg: "rgba(108,117,125,.2)", icon: "bi-question-circle", darkText: false };
+  const textColor = m.darkText ? "#212529" : m.color;
   return (
     `<span class="d-inline-flex align-items-center gap-1 px-2 py-1 rounded-2 text-nowrap"`
-    + ` style="background:${m.bg};color:${m.color};font-size:.72rem;font-weight:600;">`
+    + ` style="background:${m.bg};color:${textColor};font-size:.72rem;font-weight:600;border:1px solid ${m.color}40;">`
     + `<i class="bi ${m.icon}" aria-hidden="true"></i>${_esc(m.label)}`
     + `</span>`
   );
@@ -947,23 +1102,21 @@ function _statusBadge(status) {
 }
 
 /**
- * Barra de progresso de confiança colorida por faixa.
+ * Barra de progresso de confiança: ≥85 verde, 60–84 amarelo, <60 cinza.
  * @param {number|null} score 0–100
  * @param {boolean} [wide=false] Exibe percentual textual também
  */
 function _confidenceBar(score, wide = false) {
   if (score == null) return `<span class="text-muted-zh">—</span>`;
   const pct   = Math.max(0, Math.min(100, Math.round(score)));
-  const color = pct >= 85 ? "#f85149" : pct >= 60 ? "#d29922" : "#3fb950";
+  const color = pct >= 85 ? "#198754" : pct >= 60 ? "#ffc107" : "#6c757d";
   const label = wide ? `<div class="mt-1 text-center fw-semibold" style="font-size:.8rem;color:${color};">${pct}%</div>` : "";
   return (
-    `<div class="progress" style="height:6px;background:#30363d;border-radius:3px;min-width:60px;">`
-    + `<div class="progress-bar" role="progressbar"`
-    +   ` style="width:${pct}%;background-color:${color};border-radius:3px;"`
-    +   ` aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"`
-    +   ` title="${pct}% de confiança"></div>`
+    `<div class="score-bar" style="position:relative;height:20px;background:#30363d;border-radius:4px;min-width:50px;overflow:hidden;">`
+    + `<div class="score-fill" role="progressbar" style="width:${pct}%;background:${color};height:100%;border-radius:4px;transition:width .2s ease;"></div>`
+    + `<span class="score-label" style="position:absolute;left:0;right:0;top:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:600;color:#e6edf3;text-shadow:0 0 2px #000;">${pct}%</span>`
     + `</div>`
-    + (wide ? label : `<span class="text-muted-zh" style="font-size:.7rem;">${pct}%</span>`)
+    + (wide ? label : "")
   );
 }
 

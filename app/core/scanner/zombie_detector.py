@@ -98,6 +98,7 @@ CONVENÇÃO DE NOMENCLATURA VMware VMDK
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -326,6 +327,9 @@ class _InventorySnapshot:
 
     content_library_paths: frozenset[str]
     """Prefixos de pasta (normalizados) de Content Library — EX-6. VMDKs aqui são ignorados."""
+
+    fcd_paths: frozenset[str]
+    """Caminhos normalizados de VMDKs gerenciados como First Class Disks (FCDs/IVDs). EX-7."""
 
     vcenter_host: str
 
@@ -609,6 +613,36 @@ def _collect_content_library_paths(content: Any) -> frozenset[str]:
     return frozenset(paths)
 
 
+def _collect_fcd_paths(content: Any, datastores: list[Any]) -> frozenset[str]:
+    """
+    Coleta caminhos de First Class Disks (FCDs/IVDs) — EX-7.
+    VMDKs gerenciados via vStorageObjectManager não são orphans.
+    Disponível em vSphere 6.5+.
+    """
+    paths: set[str] = set()
+    try:
+        vstm = getattr(content, "vStorageObjectManager", None)
+        if vstm is None:
+            logger.debug("vStorageObjectManager não disponível — FCDs ignorados.")
+            return frozenset()
+        for ds in datastores:
+            try:
+                fcd_ids = vstm.ListVStorageObject(ds)
+                for fcd_id in fcd_ids or []:
+                    try:
+                        obj = vstm.RetrieveVStorageObject(fcd_id, ds)
+                        fp = getattr(obj.config.backing, "filePath", None)
+                        if fp:
+                            paths.add(_normalize(fp))
+                    except Exception as exc:
+                        logger.debug("FCD %s ignorado: %s", fcd_id, exc)
+            except Exception as exc:
+                logger.debug("FCD listing falhou no DS '%s': %s", ds.name, exc)
+    except Exception as exc:
+        logger.debug("FCD collection falhou: %s", exc)
+    return frozenset(paths)
+
+
 def _is_content_library_path(
     folder_normalized: str, full_path_normalized: str, content_library_paths: frozenset[str]
 ) -> bool:
@@ -714,6 +748,17 @@ def _collect_inventory(
     finally:
         vm_view.Destroy()
 
+    ds_view_fcd = content.viewManager.CreateContainerView(
+        datacenter, [vim.Datastore], True
+    )
+    try:
+        fcd_paths = _collect_fcd_paths(content, list(ds_view_fcd.view))
+    finally:
+        ds_view_fcd.Destroy()
+
+    if fcd_paths:
+        logger.info("FCDs coletados: %d arquivo(s) excluídos do scan.", len(fcd_paths))
+
     logger.debug(
         "Inventário coletado: %d VMDKs, %d VMXs, %d pastas de VM.",
         len(vmdk_paths),
@@ -725,6 +770,7 @@ def _collect_inventory(
         vmx_paths=frozenset(vmx_paths),
         vm_folders=frozenset(vm_folders),
         content_library_paths=content_library_paths,
+        fcd_paths=fcd_paths,
         vcenter_host=vcenter_host,
     )
 
@@ -1036,6 +1082,11 @@ def _has_broken_chain(
     return False
 
 
+def _skip(entry: _FileEntry, reason: str) -> None:
+    """Log estruturado de descarte de VMDK (nível DEBUG)."""
+    logger.debug("SKIP [%s] motivo=%r", entry.full_path, reason)
+
+
 def _classify_vmdk(
     entry: _FileEntry,
     inventory: _InventorySnapshot,
@@ -1048,37 +1099,93 @@ def _classify_vmdk(
     orphan_days: int,
     stale_snapshot_days: int,
     min_file_size_mb: int,
-) -> ZombieVmdkResult | None:
+) -> ZombieVmdkResult | tuple[None, str]:
     # READ-ONLY: no write operations
 
     if entry.is_vmx:
-        return None
+        _skip(entry, "vmx")
+        return (None, "vmx")
 
     name_lower = entry.name.lower()
-    
+
     # FALSOS POSITIVOS — EXCLUIR SEMPRE DO SCAN:
-    if (name_lower.endswith("-flat.vmdk") or 
-        name_lower.endswith("-delta.vmdk") or 
-        name_lower.endswith("-sesparse.vmdk") or 
-        name_lower.endswith("-ctk.vmdk")):
-        return None
+    if (
+        name_lower.endswith("-flat.vmdk")
+        or name_lower.endswith("-delta.vmdk")
+        or name_lower.endswith("-sesparse.vmdk")
+        or name_lower.endswith("-ctk.vmdk")
+    ):
+        _skip(entry, "suffix_exclusion")
+        return (None, "suffix_exclusion")
+
+    # EX-4: vCLS (vSphere Cluster Services) — sempre ignorar
+    if _VCLS_RE.match(entry.name):
+        _skip(entry, "vcls")
+        return (None, "vcls")
+
+    if (
+        entry.size_bytes is not None
+        and entry.size_bytes < (min_file_size_mb * 1024 * 1024)
+        and not entry.is_delta_vmdk
+        and not entry.is_descriptor_vmdk
+    ):
+        _skip(entry, "tamanho")
+        return (None, "tamanho")
+
+    # Rejeitar arquivos modificados dentro do período de graça
+    if entry.modification is not None:
+        mod_utc = _utc(entry.modification)
+        if mod_utc:
+            now = datetime.now(timezone.utc)
+            threshold_days = (
+                stale_snapshot_days
+                if ("-000" in name_lower or "snap" in name_lower or "snapshot" in name_lower)
+                else orphan_days
+            )
+            age_days = (now - mod_utc).days
+            if age_days < threshold_days:
+                size_gb = (entry.size_bytes or 0) / (1024**3)
+                log_fn = logger.warning if size_gb > 100 else logger.debug
+                log_fn(
+                    "SKIP (recente %d dias < %d) tamanho=%.1f GB: %s",
+                    age_days, threshold_days, size_gb, entry.full_path,
+                )
+                _skip(entry, "recente")
+                return (None, "recente")
 
     # Normalizar o caminho para comparação
     norm_path = _normalize(entry.full_path)
-    
+
     # Comparar cada VMDK encontrado com os caminhos registrados
     if norm_path in inventory.vmdk_paths:
-        return None  # Está em uso, não é órfão
+        _skip(entry, "inventario")
+        return (None, "inventario")
+
+    if norm_path in inventory.fcd_paths:
+        _skip(entry, "fcd")
+        return (None, "fcd")
+
+    folder_norm = _normalize(entry.folder)
+    if _is_content_library_path(folder_norm, norm_path, inventory.content_library_paths):
+        _skip(entry, "content_library")
+        return (None, "content_library")
 
     # Tipos e Motivos baseados nas regras SCAN-REGRAS-VMDK
     is_backup_artifact = "backup" in name_lower or "veeam" in name_lower or "pre-" in name_lower
     is_snapshot_leftover = "-000" in name_lower or "snap" in name_lower or "snapshot" in name_lower
 
-    folder_norm = _normalize(entry.folder)
     folder_has_registered_vm = folder_norm in inventory.vm_folders
 
+    # EX-3: datastore compartilhado → POSSIBLE_FALSE_POSITIVE (Broadcom KB 383876)
+    is_shared_datastore = datastore_name in shared_datastores
+    false_positive_reason_val: str | None = None
+
     # Inferência de motivo e tipo remapeado para banco de dados legado
-    if not folder_has_registered_vm:
+    if is_shared_datastore:
+        mapped_tipo = ZombieType.POSSIBLE_FALSE_POSITIVE
+        reason = "Datastore compartilhado entre múltiplos vCenters (EX-3)"
+        false_positive_reason_val = _CAUSES_BY_TYPE["POSSIBLE_FALSE_POSITIVE"][0]
+    elif not folder_has_registered_vm:
         reason = "VM removida do inventário mas arquivos não foram deletados"
         mapped_tipo = ZombieType.UNREGISTERED_DIR  # Mais próximo do legado para "pasta inteira órfã"
     elif is_backup_artifact:
@@ -1086,7 +1193,9 @@ def _classify_vmdk(
         mapped_tipo = ZombieType.ORPHANED
     else:
         reason = "Arquivo VMDK sem VM associada no inventário"
-        if is_snapshot_leftover:
+        if _has_broken_chain(entry, folder_files, global_files, ds_type):
+            mapped_tipo = ZombieType.BROKEN_CHAIN
+        elif is_snapshot_leftover:
             mapped_tipo = ZombieType.SNAPSHOT_ORPHAN
         else:
             mapped_tipo = ZombieType.ORPHANED
@@ -1106,12 +1215,21 @@ def _classify_vmdk(
             "3. Discos de VMs orphaned incluídos",
             "4. Varridos datastores",
             "5. Comparação case-insensitive",
-            "6. Falsos positivos excluídos"
+            "6. Falsos positivos excluídos",
+            "7. FCDs/IVDs excluídos (vStorageObjectManager)",
         ],
         likely_causes=[reason],
+        false_positive_reason=false_positive_reason_val,
         folder=entry.folder,
         datastore_type=ds_type,
-        confidence_score=95,  # Score alto pois segue regra exata
+        confidence_score=_compute_confidence_score(
+            tipo_zombie=mapped_tipo,
+            folder_has_registered_vm=folder_has_registered_vm,
+            is_shared_datastore=is_shared_datastore,
+            modification=_utc(entry.modification),
+            orphan_days=orphan_days,
+            stale_snapshot_days=stale_snapshot_days,
+        ),
     )
 
 def _find_datacenter(content: Any, name: str) -> Any:
@@ -1210,6 +1328,17 @@ def _scan_datacenter_sync(
     vcenter_instance_uuid = getattr(content.about, "instanceUuid", "") or ""
 
     metrics: list[DatastoreScanMetric] = []
+    # Acumuladores globais para scan_summary JSON ao final da sessão
+    global_skips: dict[str, int] = {
+        "recente": 0,
+        "tamanho_minimo": 0,
+        "in_inventario": 0,
+        "fcd": 0,
+        "content_library": 0,
+        "suffix_exclusion": 0,
+        "vcls": 0,
+    }
+    total_files_browsed = 0
 
     for ds_idx, ds in enumerate(datastores, start=1):
         ds_name = ds.name
@@ -1267,6 +1396,11 @@ def _scan_datacenter_sync(
             continue
 
         ds_zombies_before = len(results)
+        total_files_browsed += len(entries)
+
+        # Contadores de skip por motivo (por datastore)
+        skips_recente = skips_tamanho = skips_inventario = skips_fcd = 0
+        skips_suffix = skips_vmx = 0
 
         # Contagem detalhada de tipos de arquivo encontrados
         n_total      = len(entries)
@@ -1279,7 +1413,7 @@ def _scan_datacenter_sync(
         datastore_moref = getattr(ds, "_moId", "") or ""
 
         for entry in entries:
-            zombie = _classify_vmdk(
+            out = _classify_vmdk(
                 entry=entry,
                 inventory=inventory,
                 shared_datastores=shared_datastores,
@@ -1292,6 +1426,31 @@ def _scan_datacenter_sync(
                 stale_snapshot_days=stale_snapshot_days,
                 min_file_size_mb=min_file_size_mb,
             )
+            if isinstance(out, tuple):
+                _, reason = out
+                if reason == "recente":
+                    skips_recente += 1
+                    global_skips["recente"] += 1
+                elif reason == "tamanho":
+                    skips_tamanho += 1
+                    global_skips["tamanho_minimo"] += 1
+                elif reason == "inventario":
+                    skips_inventario += 1
+                    global_skips["in_inventario"] += 1
+                elif reason == "fcd":
+                    skips_fcd += 1
+                    global_skips["fcd"] += 1
+                elif reason == "suffix_exclusion":
+                    skips_suffix += 1
+                    global_skips["suffix_exclusion"] += 1
+                elif reason == "content_library":
+                    global_skips["content_library"] += 1
+                elif reason == "vcls":
+                    global_skips["vcls"] += 1
+                elif reason == "vmx":
+                    skips_vmx += 1
+                continue
+            zombie = out
             if zombie:
                 # Extrai pasta e arquivo do path "[ds] folder/file.vmdk"
                 vmdk_path = zombie.path
@@ -1328,6 +1487,13 @@ def _scan_datacenter_sync(
                 results.append(zombie)
 
         found_here = len(results) - ds_zombies_before
+        n_analisados = n_total
+
+        logger.info(
+            "DS '%s' resumo: total=%d analisados=%d zombies=%d skips={recente=%d, tamanho=%d, inventario=%d, fcd=%d}",
+            ds_name, n_total, n_analisados, found_here,
+            skips_recente, skips_tamanho, skips_inventario, skips_fcd,
+        )
 
         # Monta descrição detalhada dos arquivos encontrados
         if n_total == 0:
@@ -1375,6 +1541,25 @@ def _scan_datacenter_sync(
         f"Varredura concluída: {len(results)} VMDKs zombie detectados em {datacenter_name}.",
         total_zombies=len(results),
     )
+
+    scan_summary = {
+        "scan_summary": {
+            "datacenter": datacenter_name,
+            "total_files_browsed": total_files_browsed,
+            "zombies_found": len(results),
+            "skips": {
+                "recente": global_skips["recente"],
+                "tamanho_minimo": global_skips["tamanho_minimo"],
+                "in_inventario": global_skips["in_inventario"],
+                "fcd": global_skips["fcd"],
+                "content_library": global_skips["content_library"],
+                "suffix_exclusion": global_skips["suffix_exclusion"],
+                "vcls": global_skips["vcls"],
+            },
+        },
+    }
+    logger.info("SCAN_SUMMARY_JSON %s", json.dumps(scan_summary, ensure_ascii=False))
+
     return results, metrics
 
 

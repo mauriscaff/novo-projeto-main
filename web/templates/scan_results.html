@@ -127,7 +127,7 @@
       {# Filtro 4 — Tamanho mínimo em GB #}
       <div class="col-6 col-sm-4 col-md-3 col-xl-2">
         <label for="f-min-gb" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">
-          Tamanho mínimo
+          Tamanho mín.
         </label>
         <div class="input-group input-group-sm">
           <input
@@ -143,7 +143,48 @@
         </div>
       </div>
 
-      {# Filtro 5 — Data da varredura (datepicker nativo HTML5) #}
+      {# Filtro 5 — Score de confiança mínimo (0–100) #}
+      <div class="col-6 col-sm-4 col-md-3 col-xl-2">
+        <label for="f-min-confidence" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">
+          Score mín.
+        </label>
+        <input
+          type="number"
+          id="f-min-confidence"
+          class="form-control form-control-sm zh-dark-input"
+          placeholder="0"
+          min="0"
+          max="100"
+          step="1"
+          title="Score de confiança mínimo (0–100)"
+        />
+      </div>
+
+      {# Filtro 6 — Última modificação do arquivo VMDK (após / antes) #}
+      <div class="col-6 col-sm-4 col-md-3 col-xl-2">
+        <label for="f-modified-after" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">
+          Últ. mod. após
+        </label>
+        <input
+          type="date"
+          id="f-modified-after"
+          class="form-control form-control-sm zh-dark-input"
+          title="Arquivo modificado após esta data"
+        />
+      </div>
+      <div class="col-6 col-sm-4 col-md-3 col-xl-2">
+        <label for="f-modified-before" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">
+          Últ. mod. antes
+        </label>
+        <input
+          type="date"
+          id="f-modified-before"
+          class="form-control form-control-sm zh-dark-input"
+          title="Arquivo modificado antes desta data"
+        />
+      </div>
+
+      {# Filtro 7 — Data da varredura (job) #}
       <div class="col-6 col-sm-4 col-md-3 col-xl-2">
         <label for="f-date" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">
           Data da varredura
@@ -152,7 +193,7 @@
           type="date"
           id="f-date"
           class="form-control form-control-sm zh-dark-input"
-          title="Filtrar pela data em que a varredura foi executada"
+          title="Resultados de jobs iniciados nesta data"
         />
       </div>
 
@@ -219,6 +260,51 @@
   </div>
 </div>
 
+
+{# ─────────────────────────────────────────────────────────────────────────────
+   FILTROS CLIENT-SIDE (sem nova requisição ao servidor)
+───────────────────────────────────────────────────────────────────────────── #}
+<div class="zh-card mb-3">
+  <div class="card-header d-flex align-items-center gap-2">
+    <i class="bi bi-funnel text-zombie-blue" aria-hidden="true"></i>
+    <span>Filtro na tabela</span>
+  </div>
+  <div class="card-body py-3">
+    <div class="row g-3 align-items-end flex-wrap">
+      <div class="col-12 col-sm-6 col-md-4 col-lg-2">
+        <label for="zh-cf-score" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">Score mínimo</label>
+        <div class="d-flex align-items-center gap-2">
+          <input type="range" id="zh-cf-score" class="form-range" min="0" max="100" value="60" style="max-width:120px;">
+          <span id="zh-cf-score-val" style="font-size:.8rem;min-width:2rem;">60</span>
+        </div>
+      </div>
+      <div class="col-12 col-sm-6 col-md-4 col-lg-3">
+        <span class="d-block mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">Tipo de zombie</span>
+        <div class="d-flex flex-wrap gap-2">
+          <label class="d-inline-flex align-items-center gap-1" style="font-size:.8rem;"><input type="checkbox" class="form-check-input zh-cf-tipo" value="ORPHANED" checked> Orphaned</label>
+          <label class="d-inline-flex align-items-center gap-1" style="font-size:.8rem;"><input type="checkbox" class="form-check-input zh-cf-tipo" value="SNAPSHOT_ORPHAN" checked> Snapshot</label>
+          <label class="d-inline-flex align-items-center gap-1" style="font-size:.8rem;"><input type="checkbox" class="form-check-input zh-cf-tipo" value="BROKEN_CHAIN" checked> Broken</label>
+          <label class="d-inline-flex align-items-center gap-1" style="font-size:.8rem;"><input type="checkbox" class="form-check-input zh-cf-tipo" value="UNREGISTERED_DIR" checked> Unreg. Dir</label>
+          <label class="d-inline-flex align-items-center gap-1" style="font-size:.8rem;"><input type="checkbox" class="form-check-input zh-cf-tipo" value="POSSIBLE_FALSE_POSITIVE" checked> False Pos.</label>
+        </div>
+      </div>
+      <div class="col-6 col-sm-4 col-md-3 col-lg-2">
+        <label for="zh-cf-modified-days" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">Modificado há mais de (dias)</label>
+        <input type="number" id="zh-cf-modified-days" class="form-control form-control-sm zh-dark-input" min="0" placeholder="—" title="Vazio = sem filtro">
+      </div>
+      <div class="col-6 col-sm-4 col-md-3 col-lg-2">
+        <label for="zh-cf-size" class="form-label mb-1" style="font-size:.78rem;color:var(--zh-text-muted);">Tamanho mín. (GB)</label>
+        <input type="number" id="zh-cf-size" class="form-control form-control-sm zh-dark-input" min="0" step="0.1" value="0">
+      </div>
+      <div class="col-12 col-lg-auto ms-lg-auto d-flex align-items-center gap-2 flex-wrap">
+        <span id="zh-visible-count" class="text-muted-zh" style="font-size:.85rem;">Exibindo 0 de 0 resultados</span>
+        <button type="button" id="zh-export-csv-filtered" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" title="Exportar apenas as linhas visíveis (após filtros)">
+          <i class="bi bi-file-earmark-arrow-down"></i> Exportar CSV (visíveis)
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 {# ─────────────────────────────────────────────────────────────────────────────
    TABELA DATATABLES
@@ -783,6 +869,11 @@
   .dataTables_wrapper .dataTables_paginate .paginate_button.disabled {
     opacity: .35;
   }
+
+  /* Barra de score de confiança */
+  .score-bar { position: relative; height: 20px; background: var(--zh-bg-sidebar); border-radius: 4px; min-width: 50px; overflow: hidden; }
+  .score-bar .score-fill { height: 100%; border-radius: 4px; transition: width .2s ease; }
+  .score-bar .score-label { position: absolute; left: 0; right: 0; top: 0; bottom: 0; display: flex; align-items: center; justify-content: center; font-size: .7rem; font-weight: 600; color: #e6edf3; text-shadow: 0 0 2px #000; pointer-events: none; }
 
   /* Linha da tabela hover */
   #zh-table-results tbody tr:hover td {

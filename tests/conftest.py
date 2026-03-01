@@ -7,7 +7,7 @@ para rodar testes sem conexão real com VMware.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -44,6 +44,7 @@ def fake_inventory_empty() -> _InventorySnapshot:
         vmx_paths=frozenset(),
         vm_folders=frozenset(),
         content_library_paths=frozenset(),
+        fcd_paths=frozenset(),
         vcenter_host=FAKE_VCENTER_HOST,
     )
 
@@ -57,6 +58,7 @@ def fake_inventory_with_vmdk() -> _InventorySnapshot:
         vmx_paths=frozenset({f"[{FAKE_DATASTORE}] vm_old/vm_old.vmx"}),
         vm_folders=frozenset({f"[{FAKE_DATASTORE}] vm_old/"}),
         content_library_paths=frozenset(),
+        fcd_paths=frozenset(),
         vcenter_host=FAKE_VCENTER_HOST,
     )
 
@@ -69,6 +71,7 @@ def fake_inventory_content_library() -> _InventorySnapshot:
         vmx_paths=frozenset(),
         vm_folders=frozenset(),
         content_library_paths=frozenset({"[ds1] contentlib-iso/"}),
+        fcd_paths=frozenset(),
         vcenter_host=FAKE_VCENTER_HOST,
     )
 
@@ -91,7 +94,8 @@ def make_file_entry(
 ) -> _FileEntry:
     """Constrói um _FileEntry para testes."""
     if modification is None:
-        modification = datetime.now(timezone.utc)
+        # Data no passado para não ser descartado por filtro de recência (orphan_days/stale_snapshot_days)
+        modification = datetime.now(timezone.utc) - timedelta(days=100)
     if "] " in full_path:
         prefix, rest = full_path.split("] ", 1)
         parts = rest.strip().split("/")

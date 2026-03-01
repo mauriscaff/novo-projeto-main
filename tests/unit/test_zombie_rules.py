@@ -33,6 +33,16 @@ KW = dict(
 )
 
 
+def _is_zombie(r):
+    """True se o retorno de _classify_vmdk é um ZombieVmdkResult (não skip)."""
+    return r is not None and not (isinstance(r, tuple) and len(r) == 2 and r[0] is None)
+
+
+def _is_skip(r):
+    """True se o retorno de _classify_vmdk é um skip (None ou (None, reason))."""
+    return r is None or (isinstance(r, tuple) and len(r) == 2 and r[0] is None)
+
+
 def _classify(
     entry,
     inventory,
@@ -56,6 +66,7 @@ def _inv_empty():
         vmx_paths=frozenset(),
         vm_folders=frozenset(),
         content_library_paths=frozenset(),
+        fcd_paths=frozenset(),
         vcenter_host=FAKE_VC,
     )
 
@@ -66,6 +77,20 @@ def _inv_with_vmdk(normalized_path: str, vm_folder: str = ""):
         vmx_paths=frozenset({f"{vm_folder}vm.vmx".replace("//", "/")}),
         vm_folders=frozenset({vm_folder}) if vm_folder else frozenset(),
         content_library_paths=frozenset(),
+        fcd_paths=frozenset(),
+        vcenter_host=FAKE_VC,
+    )
+
+
+def _inv_with_folder(folder: str):
+    """Inventário com pasta registrada (vm_folders) mas sem VMDKs — para ORPHANED/BROKEN_CHAIN na pasta."""
+    norm = folder.strip().lower().replace("\\", "/")
+    return _InventorySnapshot(
+        vmdk_paths=frozenset(),
+        vmx_paths=frozenset(),
+        vm_folders=frozenset({norm}),
+        content_library_paths=frozenset(),
+        fcd_paths=frozenset(),
         vcenter_host=FAKE_VC,
     )
 
@@ -81,19 +106,19 @@ def test_vmdk_referenced_in_inventory_not_zombie():
     inv = _inv_with_vmdk(path.strip().lower().replace("\\", "/"), "[ds1] vm/")
     entry = make_file_entry(path, is_descriptor_vmdk=True)
     result = _classify(entry, inv, folder_files={"[DS1] vm/": {"vm.vmdk", "vm.vmx"}})
-    assert result is None
+    assert _is_skip(result)
 
 
 def test_vmdk_not_referenced_is_orphaned():
     """VMDK existe no datastore, não está em nenhuma VM → tipo=ORPHANED."""
-    inv = _inv_empty()
+    inv = _inv_with_folder("[ds1] vm/")
     entry = make_file_entry("[DS1] vm/vm.vmdk", is_descriptor_vmdk=True)
     result = _classify(
         entry, inv,
         folder_files={"[DS1] vm/": {"vm.vmdk", "vm.vmx"}},
         global_files={"vm.vmdk", "vm-flat.vmdk"},
     )
-    assert result is not None
+    assert _is_zombie(result)
     assert result.tipo_zombie == ZombieType.ORPHANED
 
 
@@ -106,11 +131,12 @@ def test_vmdk_referenced_in_template_not_zombie():
         vmx_paths=frozenset(),
         vm_folders=frozenset(),
         content_library_paths=frozenset(),
+        fcd_paths=frozenset(),
         vcenter_host=FAKE_VC,
     )
     entry = make_file_entry(path, is_descriptor_vmdk=True)
     result = _classify(entry, inv, folder_files={"[DS1] template/": {"tpl.vmdk"}})
-    assert result is None
+    assert _is_skip(result)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -127,7 +153,7 @@ def test_vmdk_in_unregistered_folder_is_zombie():
         folder_files={"[DS1] pasta_qualquer/": {"arquivo.vmdk"}},
         global_files={"arquivo.vmdk", "arquivo-flat.vmdk"},
     )
-    assert result is not None
+    assert _is_zombie(result)
     assert result.tipo_zombie == ZombieType.UNREGISTERED_DIR
 
 
@@ -141,7 +167,7 @@ def test_vmdk_in_registered_folder_other_vmdk_not_zombie_if_this_in_inventory():
         entry, inv,
         folder_files={"[DS1] vm/": {"disk2.vmdk", "vm.vmx"}},
     )
-    assert result is None
+    assert _is_skip(result)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -156,10 +182,10 @@ def test_vmdk_in_registered_folder_other_vmdk_not_zombie_if_this_in_inventory():
     ("vm.vmdk", False, ZombieType.ORPHANED),
 ])
 def test_delta_vmdk_without_active_snapshot(filename, is_delta, expected_type):
-    """Arquivo delta sem snapshot ativo na VM pai → tipo conforme parametrize."""
+    """Arquivo delta sem snapshot ativo: *-delta.vmdk são excluídos por sufixo; descriptor → tipo conforme parametrize."""
     folder = "[DS1] vm/"
     full_path = f"[DS1] vm/{filename}"
-    inv = _inv_empty()
+    inv = _inv_with_folder("[ds1] vm/") if not is_delta else _inv_empty()
     entry = make_file_entry(
         full_path,
         is_descriptor_vmdk=not is_delta,
@@ -171,8 +197,12 @@ def test_delta_vmdk_without_active_snapshot(filename, is_delta, expected_type):
         folder_files[folder].add("vm.vmx")
         global_files.add("vm-flat.vmdk")
     result = _classify(entry, inv, folder_files=folder_files, global_files=global_files)
-    assert result is not None
-    assert result.tipo_zombie == expected_type
+    if filename.endswith("-delta.vmdk"):
+        assert _is_skip(result)
+        assert isinstance(result, tuple) and result[1] == "suffix_exclusion"
+    else:
+        assert _is_zombie(result)
+        assert result.tipo_zombie == expected_type
 
 
 def test_delta_vmdk_with_active_snapshot_not_zombie():
@@ -186,7 +216,7 @@ def test_delta_vmdk_with_active_snapshot_not_zombie():
         entry, inv,
         folder_files={"[DS1] vm/": {"vm-000001.vmdk", "vm-000001-delta.vmdk", "vm.vmx"}},
     )
-    assert result is None
+    assert _is_skip(result)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -196,7 +226,7 @@ def test_delta_vmdk_with_active_snapshot_not_zombie():
 
 def test_broken_chain_detected():
     """Descriptor sem extent esperado (vm-flat.vmdk) → tipo=BROKEN_CHAIN."""
-    inv = _inv_empty()
+    inv = _inv_with_folder("[ds1] vm/")
     # size_bytes pequeno = descriptor de texto; >1MB seria tratado como monolítico e não BROKEN_CHAIN
     entry = make_file_entry(
         "[DS1] vm/vm.vmdk",
@@ -206,18 +236,18 @@ def test_broken_chain_detected():
     folder_files = {"[DS1] vm/": {"vm.vmdk", "vm.vmx"}}
     global_files = {"vm.vmdk"}
     result = _classify(entry, inv, folder_files=folder_files, global_files=global_files)
-    assert result is not None
+    assert _is_zombie(result)
     assert result.tipo_zombie == ZombieType.BROKEN_CHAIN
 
 
 def test_valid_chain_not_broken():
     """Descriptor com extent presente → não classificado como BROKEN_CHAIN."""
-    inv = _inv_empty()
+    inv = _inv_with_folder("[ds1] vm/")
     entry = make_file_entry("[DS1] vm/vm.vmdk", is_descriptor_vmdk=True)
     folder_files = {"[DS1] vm/": {"vm.vmdk", "vm-flat.vmdk", "vm.vmx"}}
     global_files = {"vm.vmdk", "vm-flat.vmdk"}
     result = _classify(entry, inv, folder_files=folder_files, global_files=global_files)
-    assert result is not None
+    assert _is_zombie(result)
     assert result.tipo_zombie != ZombieType.BROKEN_CHAIN
     assert result.tipo_zombie == ZombieType.ORPHANED
 
@@ -229,14 +259,14 @@ def test_valid_chain_not_broken():
 
 def test_disk_removed_without_delete_is_orphaned():
     """VMDK existe mas foi removido do .vmx (não deletado do disco) → tipo=ORPHANED."""
-    inv = _inv_empty()
+    inv = _inv_with_folder("[ds1] vm/")
     entry = make_file_entry("[DS1] vm/disk.vmdk", is_descriptor_vmdk=True)
     result = _classify(
         entry, inv,
         folder_files={"[DS1] vm/": {"disk.vmdk", "VM.vmx"}},
         global_files={"disk.vmdk", "disk-flat.vmdk"},
     )
-    assert result is not None
+    assert _is_zombie(result)
     assert result.tipo_zombie == ZombieType.ORPHANED
 
 
@@ -249,7 +279,7 @@ def test_ctk_vmdk_never_zombie():
     """Arquivo *-ctk.vmdk → IGNORADO (não aparece nos resultados)."""
     entry = make_file_entry("[DS1] vm/vm-ctk.vmdk", is_descriptor_vmdk=False, is_ctk_vmdk=True)
     result = _classify(entry, _inv_empty())
-    assert result is None
+    assert _is_skip(result)
 
 
 def test_flat_vmdk_with_valid_descriptor_not_zombie():
@@ -259,21 +289,21 @@ def test_flat_vmdk_with_valid_descriptor_not_zombie():
         entry, _inv_empty(),
         folder_files={"[DS1] vm/": {"vm.vmdk", "vm-flat.vmdk"}},
     )
-    assert result is None
+    assert _is_skip(result)
 
 
 def test_flat_vmdk_without_descriptor_ignored_by_design():
     """*-flat.vmdk sem descriptor: implementação atual ignora (evitar FP)."""
     entry = make_file_entry("[DS1] vm/vm-flat.vmdk", is_descriptor_vmdk=False, is_flat_vmdk=True)
     result = _classify(entry, _inv_empty(), folder_files={"[DS1] vm/": {"vm-flat.vmdk"}})
-    assert result is None
+    assert _is_skip(result)
 
 
 def test_vcls_vmdk_never_zombie():
     """Arquivo vCLS-*.vmdk → IGNORADO."""
     entry = make_file_entry("[DS1] vCLS-xyz/vCLS-xyz.vmdk", is_descriptor_vmdk=True)
     result = _classify(entry, _inv_empty())
-    assert result is None
+    assert _is_skip(result)
 
 
 def test_shared_datastore_is_false_positive():
@@ -293,7 +323,7 @@ def test_shared_datastore_is_false_positive():
         stale_snapshot_days=15,
         min_file_size_mb=50,
     )
-    assert result is not None
+    assert _is_zombie(result)
     assert result.tipo_zombie == ZombieType.POSSIBLE_FALSE_POSITIVE
 
 

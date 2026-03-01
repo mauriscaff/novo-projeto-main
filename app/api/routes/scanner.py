@@ -19,12 +19,13 @@ import io
 import json
 import logging
 import uuid
+from datetime import date, datetime, timezone
 from urllib.parse import unquote
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, cast, desc, func, select, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.scanner.scan_runner import resolve_vcenter, run_zombie_scan, get_scan_progress
@@ -66,6 +67,7 @@ _SORT_COLUMNS = {
     "ultima_modificacao": ZombieVmdkRecord.ultima_modificacao,
     "tipo_zombie": ZombieVmdkRecord.tipo_zombie,
     "datastore": ZombieVmdkRecord.datastore,
+    "confidence_score": ZombieVmdkRecord.confidence_score,
 }
 
 _CSV_FIELDS = [
@@ -371,6 +373,7 @@ _SORT_MAP_FRONTEND = {
     "size":     "tamanho_gb",
     "modified": "ultima_modificacao",
     "tipo":     "tipo_zombie",
+    "confidence_score":   "confidence_score",
     "tamanho_gb":          "tamanho_gb",
     "ultima_modificacao":  "ultima_modificacao",
     "tipo_zombie":         "tipo_zombie",
@@ -405,6 +408,11 @@ async def list_all_results(
     vcenter: Annotated[str | None, Query()] = None,
     datacenter: Annotated[str | None, Query()] = None,
     min_size_gb: Annotated[float | None, Query(ge=0)] = None,
+    min_confidence: Annotated[int | None, Query(ge=0, le=100, description="Score de confiança mínimo (0–100)")] = None,
+    max_confidence: Annotated[int | None, Query(ge=0, le=100, description="Score de confiança máximo (0–100)")] = None,
+    modified_after: Annotated[str | None, Query(description="Última modificação do VMDK após esta data (YYYY-MM-DD)")] = None,
+    modified_before: Annotated[str | None, Query(description="Última modificação do VMDK antes desta data (YYYY-MM-DD)")] = None,
+    scan_date: Annotated[str | None, Query(description="Data da varredura (YYYY-MM-DD) — resultados de jobs iniciados nesta data")] = None,
     status: Annotated[str | None, Query(description="NOVO | WHITELIST")] = None,
     sort_by: Annotated[str, Query()] = "tamanho_gb",
     sort_dir: Annotated[str, Query()] = "desc",
@@ -466,6 +474,48 @@ async def list_all_results(
         stmt = stmt.where(flt)
         count_stmt = count_stmt.where(flt)
         size_stmt = size_stmt.where(flt)
+
+    if min_confidence is not None:
+        flt = ZombieVmdkRecord.confidence_score >= min_confidence
+        stmt = stmt.where(flt)
+        count_stmt = count_stmt.where(flt)
+        size_stmt = size_stmt.where(flt)
+
+    if max_confidence is not None:
+        flt = ZombieVmdkRecord.confidence_score <= max_confidence
+        stmt = stmt.where(flt)
+        count_stmt = count_stmt.where(flt)
+        size_stmt = size_stmt.where(flt)
+
+    if modified_after:
+        try:
+            dt_after = datetime.fromisoformat(modified_after + "T00:00:00+00:00")
+            stmt = stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+            count_stmt = count_stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+            size_stmt = size_stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+        except ValueError:
+            pass
+
+    if modified_before:
+        try:
+            dt_before = datetime.fromisoformat(modified_before + "T23:59:59.999999+00:00")
+            stmt = stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+            count_stmt = count_stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+            size_stmt = size_stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+        except ValueError:
+            pass
+
+    if scan_date:
+        try:
+            d = date.fromisoformat(scan_date)
+            job_subq = select(ZombieScanJob.job_id).where(
+                cast(ZombieScanJob.started_at, Date) == d
+            )
+            stmt = stmt.where(ZombieVmdkRecord.job_id.in_(job_subq))
+            count_stmt = count_stmt.where(ZombieVmdkRecord.job_id.in_(job_subq))
+            size_stmt = size_stmt.where(ZombieVmdkRecord.job_id.in_(job_subq))
+        except ValueError:
+            pass
 
     # Filtro de status (WHITELIST exige cruzamento com a tabela)
     if status == "WHITELIST" and whitelist_paths:
@@ -551,6 +601,10 @@ async def get_results(
         float | None,
         Query(ge=0, description="Tamanho mínimo do VMDK em GB"),
     ] = None,
+    min_confidence: Annotated[int | None, Query(ge=0, le=100)] = None,
+    max_confidence: Annotated[int | None, Query(ge=0, le=100)] = None,
+    modified_after: Annotated[str | None, Query(description="Última modificação do VMDK após (YYYY-MM-DD)")] = None,
+    modified_before: Annotated[str | None, Query(description="Última modificação do VMDK antes de (YYYY-MM-DD)")] = None,
     # Ordenação
     sort_by: Annotated[
         SortByField,
@@ -611,6 +665,30 @@ async def get_results(
         stmt = stmt.where(ZombieVmdkRecord.tamanho_gb >= min_size_gb)
         count_stmt = count_stmt.where(ZombieVmdkRecord.tamanho_gb >= min_size_gb)
 
+    if min_confidence is not None:
+        stmt = stmt.where(ZombieVmdkRecord.confidence_score >= min_confidence)
+        count_stmt = count_stmt.where(ZombieVmdkRecord.confidence_score >= min_confidence)
+
+    if max_confidence is not None:
+        stmt = stmt.where(ZombieVmdkRecord.confidence_score <= max_confidence)
+        count_stmt = count_stmt.where(ZombieVmdkRecord.confidence_score <= max_confidence)
+
+    if modified_after:
+        try:
+            dt_after = datetime.fromisoformat(modified_after + "T00:00:00+00:00")
+            stmt = stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+            count_stmt = count_stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+        except ValueError:
+            pass
+
+    if modified_before:
+        try:
+            dt_before = datetime.fromisoformat(modified_before + "T23:59:59.999999+00:00")
+            stmt = stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+            count_stmt = count_stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+        except ValueError:
+            pass
+
     # ── Total e tamanho total (mesmos filtros) ──────────────────────────────────
     total: int = (await db.execute(count_stmt)).scalar_one()
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -632,6 +710,22 @@ async def get_results(
         size_stmt = size_stmt.where(ZombieVmdkRecord.datacenter.ilike(f"%{datacenter}%"))
     if min_size_gb is not None:
         size_stmt = size_stmt.where(ZombieVmdkRecord.tamanho_gb >= min_size_gb)
+    if min_confidence is not None:
+        size_stmt = size_stmt.where(ZombieVmdkRecord.confidence_score >= min_confidence)
+    if max_confidence is not None:
+        size_stmt = size_stmt.where(ZombieVmdkRecord.confidence_score <= max_confidence)
+    if modified_after:
+        try:
+            dt_after = datetime.fromisoformat(modified_after + "T00:00:00+00:00")
+            size_stmt = size_stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+        except ValueError:
+            pass
+    if modified_before:
+        try:
+            dt_before = datetime.fromisoformat(modified_before + "T23:59:59.999999+00:00")
+            size_stmt = size_stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+        except ValueError:
+            pass
     total_gb: float = (await db.execute(size_stmt)).scalar_one() or 0.0
 
     # Whitelist para status
@@ -698,6 +792,10 @@ async def export_results(
     vcenter: Annotated[str | None, Query()] = None,
     datacenter: Annotated[str | None, Query()] = None,
     min_size_gb: Annotated[float | None, Query(ge=0)] = None,
+    min_confidence: Annotated[int | None, Query(ge=0, le=100)] = None,
+    max_confidence: Annotated[int | None, Query(ge=0, le=100)] = None,
+    modified_after: Annotated[str | None, Query()] = None,
+    modified_before: Annotated[str | None, Query()] = None,
     sort_by: Annotated[SortByField, Query()] = "tamanho_gb",
     order: Annotated[SortOrder, Query()] = "desc",
     db: AsyncSession = Depends(get_db),
@@ -728,6 +826,22 @@ async def export_results(
         stmt = stmt.where(ZombieVmdkRecord.datacenter.ilike(f"%{datacenter}%"))
     if min_size_gb is not None:
         stmt = stmt.where(ZombieVmdkRecord.tamanho_gb >= min_size_gb)
+    if min_confidence is not None:
+        stmt = stmt.where(ZombieVmdkRecord.confidence_score >= min_confidence)
+    if max_confidence is not None:
+        stmt = stmt.where(ZombieVmdkRecord.confidence_score <= max_confidence)
+    if modified_after:
+        try:
+            dt_after = datetime.fromisoformat(modified_after + "T00:00:00+00:00")
+            stmt = stmt.where(ZombieVmdkRecord.ultima_modificacao >= dt_after)
+        except ValueError:
+            pass
+    if modified_before:
+        try:
+            dt_before = datetime.fromisoformat(modified_before + "T23:59:59.999999+00:00")
+            stmt = stmt.where(ZombieVmdkRecord.ultima_modificacao <= dt_before)
+        except ValueError:
+            pass
 
     sort_col = _SORT_COLUMNS[sort_by]
     sort_fn = desc if order == "desc" else asc
